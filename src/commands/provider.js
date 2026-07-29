@@ -19,7 +19,7 @@ const PROVIDER_INFO = {
   openai:     { desc: 'OpenAI / Azure / Together / Groq / any OpenAI-compatible API', needsKey: true },
   kimi:       { desc: 'Moonshot / Kimi (moonshot-v1 series)', needsKey: true },
   openrouter: { desc: 'OpenRouter — unified access to 200+ models', needsKey: true },
-  gemini:     { desc: 'Google Gemini (Gemini 1.5, Gemini 2.0 Flash)', needsKey: true },
+  gemini:     { desc: 'Google Gemini (gemini-1.5-flash, gemini-1.5-pro, gemini-2.0-flash)', needsKey: true },
   ollama:     { desc: 'Ollama — local models (no API key needed)', needsKey: false },
 };
 

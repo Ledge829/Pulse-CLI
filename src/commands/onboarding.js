@@ -58,7 +58,7 @@ async function selectProvider(rl) {
     openai: 'OpenAI (GPT-4, GPT-4o) + any OpenAI-compatible API',
     kimi: 'Moonshot / Kimi (moonshot-v1 long-context models)',
     openrouter: 'OpenRouter — unified API for 200+ models',
-    gemini: 'Google Gemini (Gemini 1.5 Pro, Gemini 2.0 Flash)',
+    gemini: 'Google Gemini (gemini-1.5-flash, gemini-1.5-pro, gemini-2.0-flash)',
     ollama: 'Ollama — local models (Llama 3, Mistral, CodeLlama)',
   };
 

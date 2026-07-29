@@ -1,12 +1,14 @@
 /**
  * Interactive chat loop — the heart of Pulse CLI.
  *
- * Handles:
- *   - Multiline input with line buffering (empty line sends)
- *   - Slash commands (/help, /clear, /exit, /history, /model, /provider, /new)
+ * Features:
+ *   - Single-line input: Enter sends immediately (natural chat UX)
+ *   - Multiline mode: /multiline or auto-detected for pasted content
+ *   - Structured TUI with headers, message threading, and status bar
  *   - Streaming AI responses with real-time output
- *   - Conversation persistence across sessions
- *   - Graceful Ctrl+C / SIGINT handling (cancel stream or exit)
+ *   - Slash commands (/help, /clear, /exit, /history, /model, /provider, /new, /multiline)
+ *   - Conversation persistence and session resume
+ *   - Graceful Ctrl+C / SIGINT handling
  *
  * @module commands/chat
  */
@@ -18,6 +20,7 @@ const { ConversationStore } = require('../lib/storage');
 const { createProvider } = require('../providers/index');
 const { showWelcome } = require('../ui/banner');
 const { startSpinner, failSpinner } = require('../ui/spinner');
+const { renderMessage, renderHeader, renderFooter, renderStatus, renderLoading } = require('../ui/terminal');
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -51,7 +54,7 @@ const COMMANDS = {
     handler: () => process.exit(0),
   },
   quit: {
-    description: 'Exit Pulse CLI (alias for /exit)',
+    description: 'Exit Pulse CLI (alias)',
     usage: '/quit',
     handler: () => process.exit(0),
   },
@@ -75,6 +78,11 @@ const COMMANDS = {
     usage: '/new',
     handler: (state) => startNewConversation(state),
   },
+  multiline: {
+    description: 'Toggle multiline input mode',
+    usage: '/multiline',
+    handler: (state) => toggleMultiline(state),
+  },
 };
 
 // ── Chat state ─────────────────────────────────────────────────────────
@@ -87,13 +95,14 @@ const COMMANDS = {
  * @property {readline.Interface} rl
  * @property {AbortController} abortController
  * @property {boolean} isStreaming
+ * @property {boolean} multilineMode
  */
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
 function showHelp() {
-  const pad = 30;
   console.log(chalk.bold('\n  ── Slash Commands ──\n'));
+  const pad = 30;
   for (const [name, cmd] of Object.entries(COMMANDS)) {
     if (name === 'quit') continue;
     const usage = chalk.cyan(cmd.usage.padEnd(pad));
@@ -101,8 +110,9 @@ function showHelp() {
   }
   console.log();
   console.log(chalk.dim('  ── Input Tips ──'));
-  console.log(`  ${chalk.cyan('multiline'.padEnd(pad))} ${chalk.dim('Enter on an empty line sends the buffer')}`);
-  console.log(`  ${chalk.cyan('Ctrl+C'.padEnd(pad))} ${chalk.dim('Cancel response (streaming) or exit (idle)')}`);
+  console.log(`  ${chalk.cyan('Enter'.padEnd(pad))} ${chalk.dim('Send message (single-line mode)')}`);
+  console.log(`  ${chalk.cyan('/multiline'.padEnd(pad))} ${chalk.dim('Toggle multiline (paste code)')}`);
+  console.log(`  ${chalk.cyan('Ctrl+C'.padEnd(pad))} ${chalk.dim('Cancel response or exit')}`);
   console.log(`  ${chalk.cyan('Ctrl+D'.padEnd(pad))} ${chalk.dim('Exit Pulse CLI')}`);
   console.log();
 }
@@ -168,57 +178,98 @@ async function startNewConversation(state) {
   console.log(chalk.dim('\n  Started a new conversation.\n'));
 }
 
+function toggleMultiline(state) {
+  state.multilineMode = !state.multilineMode;
+  const msg = state.multilineMode
+    ? 'Multiline mode: ON — type your message, empty Enter to send'
+    : 'Single-line mode: Enter sends immediately';
+  console.log(chalk.dim(`\n  ${msg}\n`));
+}
+
 // ── SIGINT handling ────────────────────────────────────────────────────
 
 function handleSigInt(state) {
-  process.stdout.write('\n');
   if (state.isStreaming) {
     state.abortController.abort();
-    console.log(chalk.dim('  ⏹ Request cancelled.\n'));
+    console.log(chalk.dim('\n  ⏹ Cancelled.\n'));
     return;
   }
   if (state.conversation.messageCount > 0) {
     state.conversation.save().catch(() => {});
   }
-  console.log(chalk.dim('  👋 Goodbye!\n'));
+  console.log(chalk.dim('\n  👋 Goodbye!\n'));
   process.exit(0);
 }
 
-// ── Input collection (multiline buffer) ────────────────────────────────
+// ── Input collection ───────────────────────────────────────────────────
 
+/**
+ * Collect input from the user.
+ *
+ * Two modes:
+ *   - Single-line (default): Enter sends immediately
+ *   - Multiline: lines buffer, empty line sends
+ *
+ * @param {ChatState} state
+ * @returns {Promise<{ text: string|null, isCommand: boolean }>}
+ */
 async function collectInput(state) {
   const buffer = [];
-  return new Promise((resolve) => {
-    let firstLine = true;
-    const showPrompt = () => {
-      if (firstLine) {
-        state.rl.setPrompt(chalk.cyan('╰─➤  '));
-        firstLine = false;
-      } else {
-        state.rl.setPrompt(chalk.dim('│  '));
-      }
-      state.rl.prompt();
-    };
 
+  return new Promise((resolve) => {
     state.rl.removeAllListeners('line');
-    state.rl.on('line', (line) => {
-      const trimmed = line.trimEnd();
-      if (buffer.length === 0 && trimmed.startsWith('/')) {
-        resolve({ text: trimmed, isCommand: true });
-        return;
-      }
-      if (trimmed === '') {
-        if (buffer.length > 0) {
-          resolve({ text: buffer.join('\n'), isCommand: false });
+
+    if (!state.multilineMode) {
+      // ── Single-line mode: Enter sends immediately ────────────────
+      state.rl.on('line', (line) => {
+        const trimmed = line.trimEnd();
+        if (!trimmed) {
+          state.rl.prompt();
           return;
         }
-        showPrompt();
-        return;
-      }
-      buffer.push(line);
-      showPrompt();
-    });
-    showPrompt();
+        if (trimmed.startsWith('/')) {
+          resolve({ text: trimmed, isCommand: true });
+        } else {
+          resolve({ text: trimmed, isCommand: false });
+        }
+      });
+      state.rl.setPrompt(chalk.cyan('╰─➤  '));
+      state.rl.prompt();
+    } else {
+      // ── Multiline mode: buffer until empty line ─────────────────
+      let firstLine = true;
+
+      const multilinePrompt = () => {
+        state.rl.setPrompt(firstLine ? chalk.cyan('╰─➤  ') : chalk.dim('│  '));
+        firstLine = false;
+        state.rl.prompt();
+      };
+
+      state.rl.on('line', (line) => {
+        const trimmed = line.trimEnd();
+
+        // Command detection on first line only
+        if (buffer.length === 0 && trimmed.startsWith('/')) {
+          resolve({ text: trimmed, isCommand: true });
+          return;
+        }
+
+        // Empty line + buffered content = send
+        if (trimmed === '') {
+          if (buffer.length > 0) {
+            resolve({ text: buffer.join('\n'), isCommand: false });
+            return;
+          }
+          multilinePrompt();
+          return;
+        }
+
+        buffer.push(line);
+        multilinePrompt();
+      });
+
+      multilinePrompt();
+    }
   });
 }
 
@@ -238,23 +289,29 @@ async function streamResponse(state) {
       if (firstToken) {
         firstToken = false;
         spinner.stop();
-        const modelLabel = chalk.dim(`[${state.config.model}]`);
-        console.log(`  ${chalk.cyan('Assistant')} ${modelLabel}`);
-        process.stdout.write('  ');
+        // Show the assistant header with model badge
+        process.stdout.write(`  ${chalk.cyan('┌─')} ${chalk.cyan('Assistant')} ${chalk.dim(`[${state.config.model}]`)}`);
+        const time = new Date();
+        const ts = `${String(time.getHours()).padStart(2,'0')}:${String(time.getMinutes()).padStart(2,'0')}:${String(time.getSeconds()).padStart(2,'0')}`;
+        process.stdout.write(` ${chalk.dim(ts)}\n`);
+        process.stdout.write(`  ${chalk.cyan('┃')} `);
       }
       if (chunk) {
         fullResponse += chunk;
         process.stdout.write(chunk);
       }
     }
+
     if (firstToken) {
-      failSpinner(spinner, 'Received empty response from provider.');
+      failSpinner(spinner, 'Empty response from provider.');
       return '';
     }
+
     process.stdout.write('\n');
+    process.stdout.write(`  ${chalk.dim('└' + '─'.repeat(30) + '┘')}\n\n`);
     return fullResponse;
   } catch (err) {
-    if (!firstToken) process.stdout.write('\n');
+    if (!firstToken) process.stdout.write('\n\n');
     throw err;
   } finally {
     if (firstToken) spinner.stop();
@@ -293,53 +350,79 @@ async function startChat(config) {
     output: process.stdout,
     terminal: true,
     historySize: 100,
+    // Remove default tab completion
+    completer: (line) => [[], line],
   });
 
   /** @type {ChatState} */
-  const state = { config, provider, conversation, rl, abortController, isStreaming: false };
+  const state = {
+    config, provider, conversation, rl,
+    abortController, isStreaming: false, multilineMode: false,
+  };
 
+  // Persistent SIGINT handler
   rl.on('SIGINT', () => handleSigInt(state));
 
   process.on('uncaughtException', (err) => {
-    console.error(chalk.red(`\n  ✖ Unexpected error: ${err.message}\n`));
+    console.error(chalk.red(`\n  ✖ ${err.message}\n`));
     conversation.save().catch(() => {});
     process.exit(1);
   });
 
+  // ── Display welcome ─────────────────────────────────────────────
   console.clear();
   showWelcome(config);
 
+  // Show header bar
+  console.log(renderHeader(config, { messageCount: conversation.messageCount }));
+  console.log();
+
+  // Resume previous conversation context
   if (conversation.messageCount > 0) {
     const msgs = conversation.messages;
-    const lastPair = msgs.filter((m) => m.role !== 'system').slice(-2);
-    if (lastPair.length > 0) {
-      console.log(chalk.dim('  ── Resuming previous conversation ──\n'));
-      for (const msg of lastPair) {
-        const label = msg.role === 'user' ? chalk.green('You') : chalk.cyan('Assistant');
-        const preview = msg.content.length > 300 ? msg.content.slice(0, 300) + '...' : msg.content;
-        console.log(`  ${label}: ${chalk.dim(preview)}\n`);
-      }
+    const recent = msgs.filter((m) => m.role !== 'system').slice(-6);
+    for (const msg of recent) {
+      process.stdout.write(renderMessage(msg) + '\n\n');
     }
+    console.log(chalk.dim('  ── resuming ──\n'));
   }
 
+  // Show footer
+  console.log(renderFooter());
+  console.log();
+
+  // ── Main loop ──────────────────────────────────────────────────
   while (true) {
     const { text, isCommand } = await collectInput(state);
     if (!text) continue;
 
+    // ── Handle slash commands ────────────────────────────────────
     if (isCommand) {
       const [cmdName, ...args] = text.slice(1).split(/\s+/);
       const command = COMMANDS[cmdName.toLowerCase()];
+
       if (command) {
-        try { await command.handler(state, args); } catch (err) {
-          console.error(chalk.red(`  ✖ Command error: ${err.message}\n`));
+        try {
+          await command.handler(state, args);
+          // Re-render footer in case multiline mode changed
+          if (cmdName === 'multiline' || cmdName === 'clear') {
+            console.log(renderFooter(state));
+            console.log();
+          }
+        } catch (err) {
+          console.error(chalk.red(`  ✖ ${err.message}\n`));
         }
       } else {
-        console.log(chalk.red(`  ✖ Unknown command: /${cmdName}`));
-        console.log(chalk.dim('    Type /help for available commands.\n'));
+        console.log(chalk.red(`  ✖ Unknown: /${cmdName}`));
+        console.log(chalk.dim('    Type /help for commands.\n'));
       }
       continue;
     }
 
+    // ── Display user message in TUI ──────────────────────────────
+    process.stdout.write(renderMessage({ role: 'user', content: text }) + '\n\n');
+
+    // ── Send to provider ─────────────────────────────────────────
     conversation.addMessage('user', text);
     conversation.deriveTitle(text);
 
@@ -352,11 +435,12 @@ async function startChat(config) {
       responseText = await streamResponse(state);
     } catch (err) {
       if (err.name === 'AbortError') continue;
-      const msg = err.code === 'NETWORK_ERROR' ? `Network error: ${err.message}`
-        : err.code === 'RATE_LIMIT' ? `${err.message}`
-          : err.code === 'API_ERROR' || err.name === 'ApiError' ? `${err.message}`
+      const code = err.code || '';
+      const msg = code === 'NETWORK_ERROR' ? `Network: ${err.message}`
+        : code === 'RATE_LIMIT' ? `${err.message}`
+          : code === 'API_ERROR' || err.name === 'ApiError' ? `${err.message}`
             : `Error: ${err.message}`;
-      console.error(chalk.red(`  ✖ ${msg}\n`));
+      console.error(`  ${chalk.red('✖')} ${chalk.dim(msg)}\n`);
       continue;
     } finally {
       state.isStreaming = false;
@@ -369,7 +453,7 @@ async function startChat(config) {
 
     conversation.addMessage('assistant', responseText);
     try { await conversation.save(); } catch (err) {
-      console.error(chalk.dim(`  ⚠ Failed to save conversation: ${err.message}\n`));
+      console.error(chalk.dim(`  ⚠ ${err.message}\n`));
     }
   }
 }

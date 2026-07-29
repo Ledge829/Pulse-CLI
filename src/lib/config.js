@@ -33,7 +33,7 @@ const PROVIDER_DEFAULTS = Object.freeze({
   },
   gemini: {
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
-    defaultModel: 'gemini-2.0-flash',
+    defaultModel: 'gemini-1.5-flash',
   },
   ollama: {
     baseUrl: 'http://localhost:11434/v1',
