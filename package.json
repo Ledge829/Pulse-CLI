@@ -12,8 +12,19 @@
   },
   "scripts": {
     "start": "node bin/pulse.js",
-    "pulse": "node bin/pulse.js"
+    "pulse": "node bin/pulse.js",
+    "prepack": "node -e \"try{require('fs').accessSync('.env')&&console.error('⚠ .env detected — remove before publishing')}catch(e){}\"",
+    "test": "node -e \"require('./src/index')\""
   },
+  "files": [
+    "bin/",
+    "src/",
+    "LICENSE",
+    "README.md",
+    "CONTRIBUTING.md",
+    ".env.example",
+    "!src/**/*.test.js"
+  ],
   "keywords": [
     "cli",
     "ai",
@@ -21,12 +32,27 @@
     "chat",
     "openai",
     "kimi",
+    "moonshot",
     "openrouter",
     "gemini",
     "ollama",
     "llm",
-    "byok"
+    "byok",
+    "terminal",
+    "developer-tools"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ledge829/Pulse-CLI.git"
+  },
+  "homepage": "https://github.com/Ledge829/Pulse-CLI#readme",
+  "bugs": {
+    "url": "https://github.com/Ledge829/Pulse-CLI/issues"
+  },
+  "author": {
+    "name": "Pulse CLI",
+    "url": "https://github.com/Ledge829/Pulse-CLI"
+  },
   "dependencies": {
     "chalk": "^4.1.2",
     "dotenv": "^16.4.5",

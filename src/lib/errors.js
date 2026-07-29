@@ -3,6 +3,8 @@
  *
  * Provides a hierarchy of typed errors and a top-level handler that
  * pretty-prints them to stderr with actionable guidance.
+ *
+ * @module lib/errors
  */
 
 const chalk = require('chalk');
@@ -11,11 +13,6 @@ const chalk = require('chalk');
 // Error classes
 // ═══════════════════════════════════════════════════════════════════════
 
-/**
- * Base error for Pulse CLI — expected failures.
- * These represent known failure modes (bad config, network, API, …)
- * and should not print a stack trace.
- */
 class PulseError extends Error {
   constructor(message, code = 'PULSE_ERROR', context = {}) {
     super(message);
@@ -73,47 +70,35 @@ class ModelNotFoundError extends PulseError {
 // ═══════════════════════════════════════════════════════════════════════
 
 const CODE_HINTS = {
-  MISSING_API_KEY:
-    'Set API_KEY in .env or run `pulse configure`.',
-  INVALID_PROVIDER:
-    'Set PROVIDER to one of: openai, kimi, openrouter, gemini, ollama.',
-  API_ERROR:
-    'The provider returned an error. Check your API key and request.',
-  NETWORK_ERROR:
-    'Could not reach the API. Check your internet connection and BASE_URL.',
-  RATE_LIMIT:
-    'You are being rate-limited. Wait before sending new requests.',
-  MODEL_NOT_FOUND:
-    'The model is invalid or not available. Use /model to switch.',
-  CONFIG_ERROR:
-    'Check your .env file for invalid values.',
+  MISSING_API_KEY: 'Set API_KEY in .env or run `pulse configure`.',
+  INVALID_PROVIDER: 'Set PROVIDER to one of: openai, kimi, openrouter, gemini, ollama.',
+  API_ERROR: 'The provider returned an error. Check your API key and request.',
+  NETWORK_ERROR: 'Could not reach the API. Check your internet connection and BASE_URL.',
+  RATE_LIMIT: 'Rate limited. Wait before sending new requests.',
+  MODEL_NOT_FOUND: 'Model not available. Use /model to switch.',
+  CONFIG_ERROR: 'Check your configuration for invalid values.',
 };
 
 /**
  * Pretty-print an error to stderr.
  *
- * - Known error types → concise, actionable message (no stack)
- * - Unknown errors  → full stack trace (unexpected bug)
+ * Known PulseError → concise, actionable with hint
+ * Unknown errors   → full stack trace
  *
  * @param {Error} err
  * @param {boolean} [exit=true]
- * @returns {never|void}
  */
 function handleError(err, exit = true) {
   if (!(err instanceof PulseError)) {
-    console.error(chalk.red('\n  ✖ Unexpected error:'));
+    console.error(chalk.red('\n  ✖ Unexpected error'));
     console.error(chalk.dim(err.stack || err.message));
-    console.error();
     if (exit) process.exit(1);
     return;
   }
 
-  const hint = CODE_HINTS[err.code] || '';
-  const lines = [
-    '',
-    chalk.red(`  ✖ ${err.message}`),
-  ];
-  if (hint) lines.push(chalk.dim(`    ${hint}`));
+  const hint = CODE_HINTS[err.code];
+  const lines = ['', `  ${chalk.red('✖')} ${err.message}`];
+  if (hint) lines.push(`    ${chalk.dim(hint)}`);
   lines.push('');
 
   console.error(lines.join('\n'));
