@@ -1,0 +1,12 @@
+.git/
+.gitignore
+.env
+.env.example
+conversations/
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+.claude/
+docs/
+src/**/*.test.js
