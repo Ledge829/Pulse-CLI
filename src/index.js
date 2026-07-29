@@ -31,10 +31,17 @@ const { runOnboarding } = require('./commands/onboarding');
 const { listConversations, viewConversation, deleteConversation } = require('./commands/history');
 const {
   initCommand, mapCommand, searchCommand, rememberCommand,
-  reviewCommand, fixCommand, explainCommand, optimizeCommand,
-  documentCommand, testCommand, releaseCommand, doctorCommand,
+  fixCommand, explainCommand, optimizeCommand,
+  documentCommand, testCommand,
   pluginInstallCommand,
 } = require('./commands/future');
+
+// Workflow engines
+const { planWorkflow } = require('./agent/workflows/plan');
+const { buildWorkflow } = require('./agent/workflows/build');
+const { reviewWorkflow } = require('./agent/workflows/review');
+const { doctorWorkflow } = require('./agent/workflows/doctor');
+const { shipWorkflow } = require('./agent/workflows/ship');
 
 const pkg = require('../package.json');
 
@@ -197,13 +204,25 @@ async function main() {
       }
       break;
 
+    // ── Workflow commands ──────────────────────────────────────────
+    case 'plan':
+      await planWorkflow(args.join(' ') || 'Analyse the current project');
+      break;
+    case 'build':
+      await buildWorkflow(args.join(' ') || 'Implement requested changes');
+      break;
+    case 'review':
+      await reviewWorkflow(args[0] || null);
+      break;
+    case 'doctor':
+      await doctorWorkflow();
+      break;
+    case 'ship':
+      await shipWorkflow(args[0] || null);
+      break;
+
     // ── Future / planned commands ───────────────────────────────────
     case 'init':     await initCommand();     break;
-    case 'plan':     await initCommand();     break; // TODO: real workflow
-    case 'build':    await initCommand();     break; // TODO: real workflow
-    case 'review':   await reviewCommand();   break;
-    case 'doctor':   await doctorCommand();   break;
-    case 'ship':     await releaseCommand();  break;
     case 'map':      await mapCommand();      break;
     case 'search':   await searchCommand();   break;
     case 'remember': await rememberCommand(); break;
