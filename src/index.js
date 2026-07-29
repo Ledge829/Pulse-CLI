@@ -33,8 +33,10 @@ const {
   initCommand, mapCommand, searchCommand, rememberCommand,
   fixCommand, explainCommand, optimizeCommand,
   documentCommand, testCommand,
-  pluginInstallCommand,
 } = require('./commands/future');
+
+// Plugin system
+const { pluginCommand, skillCommand } = require('./plugins/index');
 
 // Workflow engines
 const { planWorkflow } = require('./agent/workflows/plan');
@@ -232,12 +234,11 @@ async function main() {
     case 'document': await documentCommand(); break;
     case 'test':     await testCommand();     break;
     case 'plugin':
-      if (args[0] === 'install') {
-        await pluginInstallCommand();
-      } else {
-        console.log(chalk.cyan('\n  Plugin commands:'));
-        console.log(`    ${chalk.bold('pulse plugin install')}  ${chalk.dim('Install a plugin (coming soon)')}\n`);
-      }
+      await pluginCommand(args[0] || 'help', args.slice(1));
+      break;
+
+    case 'skill':
+      await skillCommand(args[0] || 'help', args.slice(1));
       break;
 
     default:
