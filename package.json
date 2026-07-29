@@ -1,0 +1,35 @@
+{
+  "name": "pulse-cli",
+  "version": "1.0.0",
+  "description": "Fast, provider-agnostic AI coding assistant — BYOK, any provider, all from your terminal.",
+  "license": "MIT",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "bin": {
+    "pulse": "./bin/pulse.js"
+  },
+  "scripts": {
+    "start": "node bin/pulse.js",
+    "pulse": "node bin/pulse.js"
+  },
+  "keywords": [
+    "cli",
+    "ai",
+    "coding-assistant",
+    "chat",
+    "openai",
+    "kimi",
+    "openrouter",
+    "gemini",
+    "ollama",
+    "llm",
+    "byok"
+  ],
+  "dependencies": {
+    "chalk": "^4.1.2",
+    "dotenv": "^16.4.5",
+    "ora": "^5.4.1"
+  }
+}
