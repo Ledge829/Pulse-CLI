@@ -1,6 +1,6 @@
 {
   "name": "@ledgee/pulse-cli",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Fast, provider-agnostic AI coding assistant — BYOK, any provider, all from your terminal.",
   "license": "MIT",
   "type": "commonjs",
