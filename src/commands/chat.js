@@ -1,15 +1,11 @@
 /**
- * Interactive chat loop — the heart of Pulse CLI.
+ * Pulse CLI chat — minimal, reliable, Claude Code-like.
  *
- * Features:
- *   - Single-line input: Enter sends immediately (natural chat UX)
- *   - Multiline mode: /multiline toggle for pasting code
- *   - Structured UI with message formatting and status display
- *   - Tool call execution: agent executes LLM tool requests automatically
- *   - Streaming AI responses
- *   - Slash commands for model/provider switching, history, etc.
- *   - Conversation persistence and session resume
- *   - Graceful Ctrl+C handling
+ *   - Enter sends immediately
+ *   - /multiline for code paste mode
+ *   - Tool calls detected & executed automatically
+ *   - Always streams responses to screen
+ *   - Clean per-message display
  *
  * @module commands/chat
  */
@@ -20,517 +16,314 @@ const { ConfigError } = require('../lib/errors');
 const { ConversationStore } = require('../lib/storage');
 const { createProvider } = require('../providers/index');
 const { showWelcome } = require('../ui/banner');
-const { startSpinner, failSpinner, succeedSpinner } = require('../ui/spinner');
-const { getModels, formatModelEntry } = require('../lib/models');
+const { startSpinner, succeedSpinner, failSpinner } = require('../ui/spinner');
+const { getModels } = require('../lib/models');
 const { createAgent, parseToolCalls } = require('../agent/index');
-
-// ── Constants ──────────────────────────────────────────────────────────
 
 const SYSTEM_PROMPT = `You are Pulse CLI, an AI coding assistant running in a terminal.
 
-- Help users with programming, debugging, code review, and technical questions.
-- Keep responses concise and focused. Be direct and avoid fluff.
-- Format code using markdown code blocks with language labels.
-- Use bullet points for lists, not numbered lists unless order matters.
-- You are provider-agnostic and help users regardless of which LLM backend they choose.
-- When the user asks you to read a file, search code, or run a command, respond with a tool call in this format:
-  {"name": "tool_name", "params": {"key": "value"}}
-  Available tools: file_read (path, offset, limit), file_search (pattern, glob), file_tree (depth), git_status, git_log (count), terminal_run (command, description)
-- Current date: ${new Date().toISOString().slice(0, 10)}.`;
+Help with programming, debugging, code review, and technical questions.
+Keep responses concise. Format code with markdown code blocks.
+Current date: ${new Date().toISOString().slice(0, 10)}.
 
+When asked to read files, search code, or run commands, output ONLY a JSON tool call:
+{"tool":"file_read","path":"file.js"}
+{"tool":"file_search","pattern":"function"}
+{"tool":"file_tree","depth":3}
+{"tool":"git_status":{}}
+{"tool":"git_log","count":10}
+{"tool":"terminal_run","command":"npm test"}
+Do NOT explain the tool call — just output the JSON.`;
 const CONV_DIR = require('../lib/storage').DEFAULT_DIR;
 
 // ── Slash commands ─────────────────────────────────────────────────────
-
 const COMMANDS = {
-  help: {
-    description: 'Show this help message',
-    usage: '/help',
-    handler: () => showHelp(),
-  },
-  clear: {
-    description: 'Clear the terminal screen',
-    usage: '/clear',
-    handler: () => { console.clear(); },
-  },
-  exit: {
-    description: 'Exit Pulse CLI',
-    usage: '/exit',
-    handler: () => process.exit(0),
-  },
-  quit: {
-    description: 'Exit Pulse CLI (alias)',
-    usage: '/quit',
-    handler: () => process.exit(0),
-  },
-  history: {
-    description: 'Show recent messages from this session',
-    usage: '/history [--all]',
-    handler: (state, args) => showHistory(state, args),
-  },
-  model: {
-    description: 'Switch model or list available',
-    usage: '/model <name>',
-    handler: (state, args) => changeModel(state, args),
-  },
-  models: {
-    description: 'List available models for current provider',
-    usage: '/models',
-    handler: (state) => listModels(state),
-  },
-  provider: {
-    description: 'Switch provider or show current',
-    usage: '/provider <name>',
-    handler: (state, args) => changeProvider(state, args),
-  },
-  new: {
-    description: 'Start a fresh conversation',
-    usage: '/new',
-    handler: (state) => startNewConversation(state),
-  },
-  multiline: {
-    description: 'Toggle multiline input mode',
-    usage: '/multiline',
-    handler: (state) => toggleMultiline(state),
-  },
+  help:    { desc: 'Show this help', usage: '/help', handler: (s, a) => showHelp(s, a) },
+  clear:   { desc: 'Clear screen',  usage: '/clear', handler: () => console.clear() },
+  exit:    { desc: 'Exit Pulse CLI', usage: '/exit', handler: () => process.exit(0) },
+  quit:    { desc: 'Exit Pulse CLI', usage: '/quit', handler: () => process.exit(0) },
+  model:   { desc: 'Show/switch model', usage: '/model <name>', handler: (s, a) => changeModel(s, a) },
+  models:  { desc: 'List models for this provider', usage: '/models', handler: (s) => listModels(s) },
+  provider:{ desc: 'Show/switch provider', usage: '/provider <name>', handler: (s, a) => changeProvider(s, a) },
+  new:     { desc: 'New conversation', usage: '/new', handler: (s) => newConv(s) },
+  multiline:{desc: 'Toggle multiline', usage: '/multiline', handler: (s) => { s.multiline=!s.multiline; console.log(chalk.dim(s.multiline?'Multiline: ON':'Multiline: OFF\n')); }},
 };
 
-// ── State ──────────────────────────────────────────────────────────────
-
-/** @typedef {import('../lib/config').Config} Config */
-/** @typedef {import('../providers/base').BaseProvider} BaseProvider */
-/** @typedef {import('../lib/storage').Conversation} Conversation */
-
-/**
- * @typedef {object} ChatState
- * @property {Config} config
- * @property {BaseProvider} provider
- * @property {Conversation} conversation
- * @property {readline.Interface} rl
- * @property {AbortController} abortController
- * @property {boolean} isStreaming
- * @property {boolean} multilineMode
- * @property {import('../agent/tools/registry').ToolRegistry} toolRegistry
- * @property {object} toolContext
- */
-
-// ── Helpers ────────────────────────────────────────────────────────────
-
 function showHelp() {
-  console.log(chalk.bold('\n  ── Commands ──\n'));
-  const pad = 30;
-  for (const [name, cmd] of Object.entries(COMMANDS)) {
-    if (name === 'quit') continue;
-    console.log(`  ${chalk.cyan(cmd.usage.padEnd(pad))} ${chalk.dim(cmd.description)}`);
+  console.log(chalk.bold('\n  Commands\n'));
+  for (const [n, c] of Object.entries(COMMANDS)) {
+    if (n === 'quit') continue;
+    console.log(`  ${chalk.cyan(c.usage.padEnd(28))} ${chalk.dim(c.desc)}`);
   }
-  console.log();
-  console.log(`  ${chalk.dim('Enter'.padEnd(pad))} ${chalk.dim('Send message')}`);
-  console.log(`  ${chalk.dim('Ctrl+C'.padEnd(pad))} ${chalk.dim('Cancel or exit')}`);
+  console.log(`  ${chalk.dim('Enter'.padEnd(28))} ${chalk.dim('Send message')}`);
+  console.log(`  ${chalk.dim('Ctrl+C'.padEnd(28))} ${chalk.dim('Cancel / exit')}`);
   console.log();
 }
 
-function showHistory(state, args) {
-  const showAll = args.includes('--all');
-  const messages = state.conversation.messages;
-  if (messages.length === 0) {
-    console.log(chalk.dim('\n  No messages yet.\n'));
-    return;
-  }
-  const toShow = showAll ? messages : messages.slice(-10);
-  console.log(chalk.bold(`\n  ── History (${toShow.length}/${messages.length}) ──\n`));
-  for (const msg of toShow) {
-    if (msg.role === 'system') continue;
-    const label = msg.role === 'user' ? chalk.green('You') : chalk.cyan('Assistant');
-    const preview = msg.content.length > 200 ? msg.content.slice(0, 200) + '…' : msg.content;
-    console.log(`  ${label}: ${chalk.dim(preview)}\n`);
-  }
-}
-
-function changeModel(state, args) {
-  const model = args[0];
-  if (!model) {
-    const models = getModels(state.config.provider);
-    console.log(chalk.bold(`\n  Models for ${state.config.provider}:\n`));
+function changeModel(s, a) {
+  if (!a[0]) {
+    const models = getModels(s.config.provider);
+    console.log(chalk.bold(`\n  ${s.config.provider} models:\n`));
     for (const m of models) {
-      const tag = m.free ? chalk.green(' [FREE]') : '';
-      console.log(`  ${chalk.cyan('•')} ${chalk.bold(m.name)}${tag}`);
+      const tag = m.free ? chalk.green(' FREE') : '';
+      const cur = m.name === s.config.model ? chalk.cyan(' ←') : '';
+      console.log(`  ${chalk.cyan('•')} ${chalk.bold(m.name)}${tag}${cur}`);
       console.log(`    ${chalk.dim(m.description)}`);
     }
-    console.log(chalk.dim(`\n  Current: ${chalk.bold(state.config.model)}\n`));
-    console.log(chalk.dim('  Use /model <name> to switch.\n'));
+    console.log(chalk.dim(`\n  Use /model <name>\n`));
     return;
   }
-  state.config = { ...state.config, model };
-  state.conversation.model = model;
-  console.log(chalk.dim(`\n  Model → ${chalk.bold(model)}\n`));
+  s.config.model = a[0];
+  s.conversation.model = a[0];
+  console.log(chalk.dim(`\n  Model → ${chalk.bold(a[0])}\n`));
 }
 
-function listModels(state) {
-  const models = getModels(state.config.provider);
-  if (models.length === 0) {
-    console.log(chalk.dim(`\n  No curated models for ${state.config.provider}. Use /model <name> to set one.\n`));
-    return;
-  }
-  console.log(chalk.bold(`\n  ${state.config.provider} models:\n`));
+function listModels(s) {
+  const models = getModels(s.config.provider);
+  if (!models.length) { console.log(chalk.dim(`\n  No model list for ${s.config.provider}\n`)); return; }
+  console.log(chalk.bold(`\n  ${s.config.provider}:\n`));
   for (const m of models) {
-    const tag = m.free ? chalk.green(' ✓ FREE') : chalk.yellow('  paid');
-    const current = m.name === state.config.model ? chalk.cyan(' ← active') : '';
-    console.log(`  ${chalk.cyan('•')} ${chalk.bold(m.name)}${tag}${current}`);
-    console.log(`    ${chalk.dim(m.description)}`);
+    const tag = m.free ? chalk.green(' FREE') : chalk.yellow(' paid');
+    const cur = m.name === s.config.model ? chalk.cyan(' ←') : '';
+    console.log(`  ${chalk.cyan('•')} ${chalk.bold(m.name)}${tag}${cur}`);
   }
   console.log();
 }
 
-function changeProvider(state, args) {
-  const name = args[0];
-  if (!name) {
-    console.log(chalk.dim(`\n  Provider: ${chalk.bold(state.config.provider)}`));
-    console.log(chalk.dim('  Use /provider <name> to switch.\n'));
-    return;
-  }
+function changeProvider(s, a) {
+  if (!a[0]) { console.log(chalk.dim(`  Provider: ${chalk.bold(s.config.provider)}\n`)); return; }
   try {
-    const newConfig = { ...state.config, provider: name };
-    state.provider = createProvider(newConfig);
-    state.config = newConfig;
-    state.conversation.provider = name;
-    // Recreate agent with new context
-    const agent = createAgent({ cwd: process.cwd() });
-    state.toolRegistry = agent.registry;
-    state.toolContext = agent.context;
-    // Show model info for new provider
-    const models = getModels(name);
-    if (models.length > 0) {
-      state.config.model = models[0].name;
-      state.conversation.model = models[0].name;
-    }
-    console.log(chalk.green(`\n  ✓ Provider → ${chalk.bold(name)}`));
-    console.log(chalk.dim(`    Model → ${chalk.bold(state.config.model)}\n`));
-  } catch (err) {
-    console.error(chalk.red(`  ✖ ${err.message}\n`));
-  }
+    const cfg = { ...s.config, provider: a[0] };
+    s.provider = createProvider(cfg);
+    s.config = cfg;
+    s.conversation.provider = a[0];
+    const models = getModels(a[0]);
+    if (models.length) { s.config.model = models[0].name; s.conversation.model = models[0].name; }
+    const ag = createAgent({ cwd: process.cwd() });
+    s.registry = ag.registry;
+    s.ctx = ag.context;
+    console.log(chalk.green(`  → ${a[0]} · ${s.config.model}\n`));
+  } catch (e) { console.log(chalk.red(`  ✖ ${e.message}\n`)); }
 }
 
-async function startNewConversation(state) {
-  if (state.conversation.messageCount > 0) {
-    try { await state.conversation.save(); } catch { /* ignore */ }
-  }
+async function newConv(s) {
+  if (s.conversation.messageCount > 0) try { await s.conversation.save(); } catch {}
   const store = new ConversationStore(CONV_DIR);
-  state.conversation = store.create({
-    model: state.config.model,
-    provider: state.config.provider,
-    messages: [{ role: 'system', content: SYSTEM_PROMPT }],
-  });
-  console.log(chalk.dim('\n  New conversation started.\n'));
-}
-
-function toggleMultiline(state) {
-  state.multilineMode = !state.multilineMode;
-  console.log(chalk.dim(`\n  Multiline: ${state.multilineMode ? 'ON — empty Enter to send' : 'OFF — Enter sends immediately'}\n`));
-}
-
-// ── SIGINT ─────────────────────────────────────────────────────────────
-
-function handleSigInt(state) {
-  if (state.isStreaming) {
-    state.abortController.abort();
-    console.log(chalk.dim('\n  Cancelled.\n'));
-    return;
-  }
-  try { state.conversation.save(); } catch { /* ignore */ }
-  console.log(chalk.dim('\n  Goodbye!\n'));
-  process.exit(0);
+  s.conversation = store.create({ model: s.config.model, provider: s.config.provider, messages: [{ role: 'system', content: SYSTEM_PROMPT }] });
+  console.log(chalk.dim('  New conversation.\n'));
 }
 
 // ── Input ──────────────────────────────────────────────────────────────
-
-async function collectInput(state) {
-  const buffer = [];
-
-  return new Promise((resolve) => {
-    state.rl.removeAllListeners('line');
-
-    if (!state.multilineMode) {
-      // Single-line: Enter sends immediately
-      state.rl.on('line', (line) => {
-        const trimmed = line.trimEnd();
-        if (!trimmed) { state.rl.prompt(); return; }
-        resolve({
-          text: trimmed,
-          isCommand: trimmed.startsWith('/'),
-        });
+async function getInput(s) {
+  const buf = [];
+  return new Promise((r) => {
+    s.rl.removeAllListeners('line');
+    if (!s.multiline) {
+      s.rl.on('line', (l) => {
+        const t = l.trimEnd();
+        if (!t) { s.rl.prompt(); return; }
+        r({ text: t, cmd: t.startsWith('/') });
       });
-      state.rl.setPrompt(chalk.cyan('╰─➤  '));
-      state.rl.prompt();
+      s.rl.setPrompt(chalk.cyan('╰─➤  '));
+      s.rl.prompt();
     } else {
-      // Multiline: buffer until empty line
       let first = true;
-      const show = () => {
-        state.rl.setPrompt(first ? chalk.cyan('╰─➤  ') : chalk.dim('│  '));
-        first = false;
-        state.rl.prompt();
-      };
-      state.rl.on('line', (line) => {
-        const t = line.trimEnd();
-        if (buffer.length === 0 && t.startsWith('/')) {
-          resolve({ text: t, isCommand: true });
-          return;
-        }
-        if (t === '' && buffer.length > 0) {
-          resolve({ text: buffer.join('\n'), isCommand: false });
-          return;
-        }
-        buffer.push(line);
-        show();
+      const p = () => { s.rl.setPrompt(first ? chalk.cyan('╰─➤  ') : chalk.dim('│  ')); first = false; s.rl.prompt(); };
+      s.rl.on('line', (l) => {
+        const t = l.trimEnd();
+        if (!buf.length && t.startsWith('/')) { r({ text: t, cmd: true }); return; }
+        if (t === '' && buf.length) { r({ text: buf.join('\n'), cmd: false }); return; }
+        buf.push(l); p();
       });
-      show();
+      p();
     }
   });
 }
 
-// ── Tool calling loop ──────────────────────────────────────────────────
+// ── Tool detection ─────────────────────────────────────────────────────
+function detectToolCalls(text) {
+  const calls = [];
+  try {
+    const p = JSON.parse(text);
+    if (p.tool && p.name) calls.push({ name: p.tool || p.name, params: p.params || p });
+    else if (p.name && p.params) calls.push({ name: p.name, params: p.params });
+    else if (p.tool) calls.push({ name: p.tool, params: Object.fromEntries(Object.entries(p).filter(([k]) => k !== 'tool')) });
+    else if (Array.isArray(p)) { for (const item of p) { if (item.tool) calls.push({ name: item.tool, params: item }); } }
+  } catch {}
+  // Also check for XML format
+  const xmlRe = /<tool\s+name="([^"]+)">([\s\S]*?)<\/tool>/g;
+  let m;
+  while ((m = xmlRe.exec(text)) !== null) {
+    const params = {};
+    const pRe = /<param\s+name="([^"]+)">([\s\S]*?)<\/param>/g;
+    let pm;
+    while ((pm = pRe.exec(m[2])) !== null) params[pm[1]] = pm[2].trim();
+    calls.push({ name: m[1], params });
+  }
+  return calls;
+}
 
-/**
- * Process a message through the agent tool loop.
- * Detects tool calls, executes them, and returns the final response.
- */
-async function processWithTools(state, userMessage) {
-  // Set up the agent tools
-  const agent = createAgent({ cwd: process.cwd() });
+// ── Core: process one user message ─────────────────────────────────────
+async function handleMessage(s, text) {
+  s.conversation.addMessage('user', text);
+  s.conversation.deriveTitle(text);
 
-  // Prepare messages including system prompt
-  const messages = state.conversation.messages.map((m) => ({
-    role: m.role, content: m.content,
-  }));
+  const ac = new AbortController();
+  s.ac = ac;
+  s.streaming = true;
 
-  // Add the user's new message
-  messages.push({ role: 'user', content: userMessage });
+  // ── First: try non-streaming to detect tool calls ──────────────
+  let final = '';
+  const msgs = s.conversation.messages.map(m => ({ role: m.role, content: m.content }));
 
-  let finalResponse = '';
-  let toolRound = 0;
-  const MAX_TOOL_ROUNDS = 10;
+  for (let round = 0; round < 10; round++) {
+    if (ac.signal.aborted) { s.streaming = false; return; }
 
-  while (toolRound < MAX_TOOL_ROUNDS) {
-    toolRound++;
+    const sp = startSpinner(round === 0 ? '  Processing…' : `  Tool round ${round}…`);
 
-    // Get response from provider (non-streaming for tool detection)
-    const spinner = startSpinner(toolRound === 1
-      ? '  Processing…'
-      : `  Tool round ${toolRound}…`);
-
-    let response;
+    let resp;
     try {
-      response = await state.provider.chatComplete(messages, state.abortController.signal);
+      resp = await s.provider.chatComplete(msgs, ac.signal);
     } catch (err) {
-      failSpinner(spinner, err.message || 'Request failed');
+      failSpinner(sp, err.message || 'Request failed');
+      s.streaming = false;
       throw err;
     }
+    succeedSpinner(sp);
 
-    succeedSpinner(spinner);
+    const content = (resp.content || '').trim();
+    if (!content) { s.streaming = false; return; }
 
-    const content = response.content || '';
-    if (!content.trim()) {
-      finalResponse = '';
-      break;
+    // Detect tool calls
+    const calls = detectToolCalls(content);
+    if (!calls.length) {
+      // No tools — this is the final response. Stream it.
+      s.streaming = false;
+      if (!s.multiline) {
+        // Show clean response
+        console.log(`  ${chalk.cyan('Assistant')} ${chalk.dim(`[${s.config.model}]`)}`);
+        for (const line of content.split('\n')) {
+          console.log(`  ${line}`);
+        }
+        console.log();
+      } else {
+        // Fall through to streaming
+      }
+      final = content;
+      s.streaming = false;
+      s.conversation.addMessage('assistant', content);
+      try { await s.conversation.save(); } catch {}
+      return;
     }
 
-    // Check if the response contains tool calls
-    const toolCalls = parseToolCalls(content);
-
-    if (toolCalls.length === 0) {
-      // No tool calls — this is the final response
-      finalResponse = content;
-      break;
-    }
-
-    // Execute tool calls and add results
+    // ── Execute tool calls ───────────────────────────────────────
+    console.log(`  ${chalk.cyan('▸ Tools:')}`);
     const results = [];
-    for (const call of toolCalls) {
-      console.log(`  ${chalk.cyan('●')} ${chalk.dim(call.name)} ${JSON.stringify(call.params)}`);
+    for (const c of calls) {
+      console.log(`    ${chalk.cyan('·')} ${chalk.bold(c.name)} ${chalk.dim(JSON.stringify(c.params))}`);
       try {
-        const result = await agent.registry.execute(call.name, call.params, agent.context);
-        results.push({
-          role: 'tool',
-          name: call.name,
-          content: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
-        });
+        const res = await s.registry.execute(c.name, c.params, s.ctx);
+        const txt = typeof res === 'string' ? res : JSON.stringify(res, null, 2);
+        results.push({ role: 'user', content: `[${c.name} result]\n${txt}` });
+        console.log(`    ${chalk.green('✓')} ${chalk.dim(txt.slice(0, 100))}${txt.length > 100 ? '…' : ''}`);
       } catch (err) {
-        results.push({
-          role: 'tool',
-          name: call.name,
-          content: `Error: ${err.message}`,
-        });
+        results.push({ role: 'user', content: `[${c.name} error]\n${err.message}` });
+        console.log(`    ${chalk.red('✖')} ${chalk.dim(err.message)}`);
       }
     }
 
-    // Add assistant response and tool results to messages
-    messages.push({ role: 'assistant', content });
-    for (const r of results) {
-      messages.push({ role: 'user', content: `[Tool ${r.name} result]\n${r.content}` });
-    }
+    // Add to messages and loop for next response
+    msgs.push({ role: 'assistant', content });
+    msgs.push(...results);
+    console.log();
   }
 
-  return finalResponse;
-}
-
-// ── Streaming response display ─────────────────────────────────────────
-
-async function streamFinalResponse(state) {
-  const messages = state.conversation.messages.map((m) => ({
-    role: m.role, content: m.content,
-  }));
-
-  const spinner = startSpinner('  …');
-  let full = '';
-  let gotFirst = false;
-
+  s.streaming = false;
+  // Fallback: stream the response directly
   try {
-    for await (const chunk of state.provider.streamChat(messages, state.abortController.signal)) {
-      if (!gotFirst) {
-        gotFirst = true;
-        spinner.stop();
-        process.stdout.write(`  ${chalk.cyan('Assistant')} ${chalk.dim(`[${state.config.model}]`)}\n  `);
-      }
-      if (chunk) { full += chunk; process.stdout.write(chunk); }
+    const sp = startSpinner('  …');
+    let got = false;
+    for await (const chunk of s.provider.streamChat(
+      s.conversation.messages.map(m => ({ role: m.role, content: m.content })),
+      ac.signal
+    )) {
+      if (!got) { got = true; sp.stop(); console.log(`  ${chalk.cyan('Assistant')} ${chalk.dim(`[${s.config.model}]`)}`); }
+      if (chunk) { final += chunk; process.stdout.write(chunk); }
     }
-    if (!gotFirst) { failSpinner(spinner, 'Empty response'); return ''; }
-    process.stdout.write('\n\n');
-    return full;
+    if (!got) { sp.stop(); }
+    if (got) process.stdout.write('\n\n');
+    if (final) {
+      s.conversation.addMessage('assistant', final);
+      try { await s.conversation.save(); } catch {}
+    }
   } catch (err) {
-    if (!gotFirst) spinner.stop();
-    if (err.name !== 'AbortError') process.stdout.write('\n');
-    throw err;
+    if (err.name !== 'AbortError') console.error(`  ${chalk.red('✖')} ${chalk.dim(err.message)}\n`);
   }
 }
 
-// ── Main chat loop ─────────────────────────────────────────────────────
-
+// ── Main loop ──────────────────────────────────────────────────────────
 async function startChat(config) {
   const store = new ConversationStore(CONV_DIR);
-  let abortController = new AbortController();
+  let conv = await store.latest().catch(() => null);
+  if (!conv) conv = store.create({ model: config.model, provider: config.provider, messages: [{ role: 'system', content: SYSTEM_PROMPT }] });
 
-  // Load or create conversation
-  let conversation = await store.latest().catch(() => null);
-  if (!conversation) {
-    conversation = store.create({
-      model: config.model, provider: config.provider,
-      messages: [{ role: 'system', content: SYSTEM_PROMPT }],
-    });
-  }
-
-  // Create provider
-  let provider;
-  try { provider = createProvider(config); } catch (err) {
-    if (err instanceof ConfigError) {
-      console.error(chalk.red(`  ✖ ${err.message}`));
-      console.error(chalk.dim('  Run `pulse configure` to set up.\n'));
-      process.exit(1);
-    }
+  let prov;
+  try { prov = createProvider(config); } catch (err) {
+    if (err instanceof ConfigError) { console.error(chalk.red(`  ✖ ${err.message}\n  Run pulse configure\n`)); process.exit(1); }
     throw err;
   }
 
-  // Set up agent tools for this session
-  const agent = createAgent({ cwd: process.cwd() });
+  const ag = createAgent({ cwd: process.cwd() });
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true, historySize: 100, completer: () => [[], ''] });
 
-  // Readline interface
-  const rl = readline.createInterface({
-    input: process.stdin, output: process.stdout,
-    terminal: true, historySize: 100,
-    completer: () => [[], ''], // no tab complete
+  const state = { config, provider: prov, conversation: conv, rl, ac: new AbortController(), streaming: false, multiline: false, registry: ag.registry, ctx: ag.context };
+  rl.on('SIGINT', () => {
+    if (state.streaming) { state.ac.abort(); console.log(chalk.dim('\n  Cancelled.\n')); return; }
+    try { state.conversation.save(); } catch {}
+    console.log(chalk.dim('\n  Goodbye!\n')); process.exit(0);
   });
 
-  const state = {
-    config, provider, conversation, rl, abortController,
-    isStreaming: false, multilineMode: false,
-    toolRegistry: agent.registry, toolContext: agent.context,
-  };
-
-  rl.on('SIGINT', () => handleSigInt(state));
-
-  process.on('uncaughtException', (err) => {
-    console.error(chalk.red(`\n  ✖ ${err.message}\n`));
-    try { conversation.save(); } catch { /* ignore */ }
-    process.exit(1);
-  });
-
-  // ── Welcome ────────────────────────────────────────────────────────
   console.clear();
   showWelcome(config);
 
-  // Resume context
-  if (conversation.messageCount > 0) {
-    const last = conversation.messages.filter((m) => m.role !== 'system').slice(-2);
-    if (last.length > 0) {
+  if (conv.messageCount > 0) {
+    const last = conv.messages.filter(m => m.role !== 'system').slice(-2);
+    if (last.length) {
       console.log(chalk.dim('  ── Resuming ──\n'));
-      for (const msg of last) {
-        const label = msg.role === 'user' ? chalk.green('You') : chalk.cyan('Assistant');
-        const preview = msg.content.length > 300 ? msg.content.slice(0, 300) + '…' : msg.content;
-        console.log(`  ${label}: ${chalk.dim(preview)}\n`);
+      for (const m of last) {
+        const l = m.role === 'user' ? chalk.green('You') : chalk.cyan('Assistant');
+        const p = m.content.length > 300 ? m.content.slice(0, 300) + '…' : m.content;
+        console.log(`  ${l}: ${chalk.dim(p)}\n`);
       }
     }
   }
 
-  // ── Main loop ──────────────────────────────────────────────────────
+  // Status line
+  console.log(chalk.dim(`  ${config.provider} · ${config.model}  |  /help for commands\n`));
+
   while (true) {
-    const { text, isCommand } = await collectInput(state);
+    const { text, cmd } = await getInput(state);
     if (!text) continue;
 
-    // ── Slash commands ───────────────────────────────────────────────
-    if (isCommand) {
-      const [cmdName, ...args] = text.slice(1).split(/\s+/);
-      const cmd = COMMANDS[cmdName.toLowerCase()];
-      if (cmd) {
-        try { await cmd.handler(state, args); } catch (err) {
-          console.error(chalk.red(`  ✖ ${err.message}\n`));
-        }
-      } else {
-        console.log(chalk.red(`  ✖ Unknown: /${cmdName}`));
-        console.log(chalk.dim('    Type /help for commands.\n'));
-      }
+    if (cmd) {
+      const [cn, ...ca] = text.slice(1).split(/\s+/);
+      const c = COMMANDS[cn.toLowerCase()];
+      if (c) { try { await c.handler(state, ca); } catch (e) { console.log(chalk.red(`  ✖ ${e.message}\n`)); } }
+      else { console.log(chalk.red(`  ✖ /${cn}\n`)); }
       continue;
     }
 
-    // ── User message ─────────────────────────────────────────────────
+    // Show user message
     console.log(`  ${chalk.green('You')} ${chalk.dim(`[${state.config.model}]`)}`);
-    console.log(`  ${text}\n`);
+    for (const line of text.split('\n')) console.log(`  ${line}`);
+    console.log();
 
-    conversation.addMessage('user', text);
-    conversation.deriveTitle(text);
-
-    abortController = new AbortController();
-    state.abortController = abortController;
-    state.isStreaming = true;
-
-    try {
-      // Phase 1: Process with tool support
-      const finalResponse = await processWithTools(state, text);
-
-      if (state.abortController.signal.aborted) {
-        state.isStreaming = false;
-        continue;
-      }
-
-      if (finalResponse) {
-        // Phase 2: Stream the final response
-        conversation.addMessage('assistant', finalResponse);
-      } else {
-        // If no final response from tool loop, stream directly
-        const responseText = await streamFinalResponse(state);
-        if (responseText) conversation.addMessage('assistant', responseText);
-      }
-    } catch (err) {
-      if (err.name === 'AbortError') { state.isStreaming = false; continue; }
-      const code = err.code || '';
-      const msg = code === 'NETWORK_ERROR' ? `Network: ${err.message}`
-        : code === 'RATE_LIMIT' ? `${err.message}`
-          : code === 'API_ERROR' ? `${err.message}`
-            : `${err.message}`;
-      console.error(`  ${chalk.red('✖')} ${chalk.dim(msg)}\n`);
-    } finally {
-      state.isStreaming = false;
+    // Process
+    try { await handleMessage(state, text); } catch (err) {
+      if (err.name === 'AbortError') continue;
+      const msg = err.code === 'NETWORK_ERROR' ? `Network: ${err.message}` : err.message;
+      console.log(`  ${chalk.red('✖')} ${chalk.dim(msg)}\n`);
     }
-
-    // Save after each exchange
-    try { await conversation.save(); } catch { /* ignore */ }
   }
 }
 
