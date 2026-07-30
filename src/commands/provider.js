@@ -1,9 +1,19 @@
 /**
- * Provider management for Pulse CLI.
+ * Provider management for Pulse CLI
  *
- * `pulse provider` — list, add, remove, test, and switch providers.
+ * This file handles the `pulse provider` command. It lets you:
+ *   - List all available providers
+ *   - Add a new provider configuration
+ *   - Remove a provider
+ *   - Test a provider connection
+ *   - Switch between providers
  *
- * @module commands/provider
+ * Usage:
+ *   pulse provider          — List all providers
+ *   pulse provider -i       — Switch providers interactively
+ *   pulse provider --add    — Add a new provider
+ *   pulse provider --remove <name>  — Remove a provider
+ *   pulse provider --test <name>    — Test a provider connection
  */
 
 const readline = require('readline');
@@ -13,211 +23,331 @@ const { createProvider } = require('../providers/index');
 const { ProviderStore } = require('../lib/config-store');
 const { withSpinner } = require('../ui/spinner');
 
-// ── Provider info table ────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// PROVIDER INFORMATION
+// ──────────────────────────────────────────────────────────────────────
+// This tells us about each provider: what it is and whether it needs
+// an API key.
 
 const PROVIDER_INFO = {
-  openai:     { desc: 'OpenAI / Azure / Together / Groq / any OpenAI-compatible API', needsKey: true },
-  kimi:       { desc: 'Moonshot / Kimi (moonshot-v1 series)', needsKey: true },
-  openrouter: { desc: 'OpenRouter — unified access to 200+ models', needsKey: true },
-  gemini:     { desc: 'Google Gemini (gemini-1.5-flash, gemini-1.5-pro, gemini-2.0-flash)', needsKey: true },
-  ollama:     { desc: 'Ollama — local models (no API key needed)', needsKey: false },
+  openai: {
+    description: 'OpenAI (GPT-4, GPT-4o) + any OpenAI-compatible API like Together AI, Groq, LocalAI',
+    needsApiKey: true
+  },
+  kimi: {
+    description: 'Moonshot / Kimi (moonshot-v1 series models with long context windows)',
+    needsApiKey: true
+  },
+  openrouter: {
+    description: 'OpenRouter — unified API for 200+ models including Claude, Gemini, Llama',
+    needsApiKey: true
+  },
+  gemini: {
+    description: 'Google Gemini (gemini-1.5-flash, gemini-1.5-pro, gemini-2.0-flash)',
+    needsApiKey: true
+  },
+  ollama: {
+    description: 'Ollama — run models locally (no API key needed, runs on your machine)',
+    needsApiKey: false
+  }
 };
 
-// ── Display ────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// DISPLAY: SHOW ALL PROVIDERS
+// ──────────────────────────────────────────────────────────────────────
 
-/**
- * Pretty-print all known providers with status.
- * @param {object} [opts]
- * @param {string} [opts.active]
- * @param {string[]} [opts.configured]
- */
-function listProvidersTable(opts = {}) {
-  const configured = new Set(opts.configured || []);
-  const active = opts.active;
+function showProviderTable(options) {
+  // Get the list of provider names that have been configured
+  const configuredProviders = options.configured || [];
+  const activeProvider = options.active;
 
   console.log(chalk.bold('\n  Providers\n'));
   console.log(chalk.dim('  ──────────────────────────────────────────────────────'));
 
-  for (const [name, info] of Object.entries(PROVIDER_INFO)) {
-    const isActive = name === active;
-    const isConfigured = configured.has(name);
-    const bullet = isActive ? chalk.green('▶') : ' ';
-    const nameDisplay = isActive ? chalk.bold.green(name) : chalk.cyan(name);
-    const statusTag = isActive
-      ? chalk.green(' active')
-      : isConfigured
-        ? chalk.dim(' configured')
-        : chalk.dim(' not configured');
-    const keyStatus = info.needsKey ? '' : chalk.dim(' (no key needed)');
+  // Loop through each provider and show its status
+  for (const [providerName, providerInfo] of Object.entries(PROVIDER_INFO)) {
+    const isActive = providerName === activeProvider;
+    const isConfigured = configuredProviders.includes(providerName);
 
-    console.log(`  ${bullet} ${nameDisplay}${statusTag}${keyStatus}`);
-    console.log(`    ${chalk.dim(info.desc)}`);
+    // Choose the right symbols and colors
+    const bulletPoint = isActive ? chalk.green('▶') : ' ';
+    const displayName = isActive ? chalk.bold.green(providerName) : chalk.cyan(providerName);
+
+    // Show the status tag
+    let statusTag;
+    if (isActive) {
+      statusTag = chalk.green(' active');
+    } else if (isConfigured) {
+      statusTag = chalk.dim(' configured');
+    } else if (!providerInfo.needsApiKey) {
+      statusTag = chalk.dim(' (no key needed — just switch to it)');
+    } else {
+      statusTag = chalk.dim(' not configured');
+    }
+
+    // Print the provider line
+    console.log(`  ${bulletPoint} ${displayName}${statusTag}`);
+    console.log(`    ${chalk.dim(providerInfo.description)}`);
   }
 
   console.log(chalk.dim('  ──────────────────────────────────────────────────────'));
   console.log();
 }
 
-// ── Provider CRUD ─────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// ACTION: ADD A PROVIDER
+// ──────────────────────────────────────────────────────────────────────
+// Prompts the user to add a new provider with API key and model settings.
 
 async function addProvider() {
-  const rl = readline.createInterface({
-    input: process.stdin, output: process.stdout, terminal: true,
+  // Set up a readline interface for user input
+  const readlineInterface = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true
   });
 
   try {
-    console.log(chalk.bold('\n  Add Provider\n'));
+    console.log(chalk.bold('\n  Add a New Provider\n'));
 
+    // Show the list of available providers
     const providers = knownProviders();
-    providers.forEach((p, i) => {
-      console.log(`  ${chalk.cyan(String(i + 1))}. ${chalk.bold(p)}`);
-    });
+    for (let i = 0; i < providers.length; i++) {
+      console.log(`  ${chalk.cyan(String(i + 1))}. ${chalk.bold(providers[i])}`);
+    }
     console.log();
 
-    const idxAnswer = await new Promise((r) => rl.question('  Number: ', r));
-    const idx = parseInt(idxAnswer.trim(), 10) - 1;
-    if (idx < 0 || idx >= providers.length) {
+    // Ask the user to pick a provider by number
+    const numberAnswer = await new Promise(function(resolve) {
+      readlineInterface.question('  Number: ', resolve);
+    });
+
+    const selectedIndex = parseInt(numberAnswer.trim(), 10) - 1;
+
+    // Validate the selection
+    if (selectedIndex < 0 || selectedIndex >= providers.length) {
       console.log(chalk.red('  ✖ Invalid selection\n'));
       return;
     }
-    const provider = providers[idx];
 
-    const defaults = providerDefaults(provider);
-    const apiKey = provider === 'ollama'
-      ? ''
-      : await new Promise((r) => rl.question('  API Key: ', r));
-    const model = await new Promise((r) => rl.question(`  Model [${defaults.defaultModel}]: `, r));
-    const baseUrl = await new Promise((r) => rl.question(`  Base URL [${defaults.baseUrl}]: `, r));
+    const selectedProvider = providers[selectedIndex];
+    const defaults = providerDefaults(selectedProvider);
 
-    const store = new ProviderStore();
-    store.setProvider(provider, {
-      apiKey: apiKey.trim(),
-      model: model.trim() || defaults.defaultModel,
-      baseUrl: (baseUrl.trim() || defaults.baseUrl).replace(/\/+$/, ''),
-      addedAt: new Date().toISOString(),
+    // Ask for API key (Ollama doesn't need one)
+    let apiKey = '';
+    if (selectedProvider !== 'ollama') {
+      apiKey = await new Promise(function(resolve) {
+        readlineInterface.question('  API Key: ', resolve);
+      });
+    }
+
+    // Ask for model (with default shown)
+    const model = await new Promise(function(resolve) {
+      const defaultModel = defaults ? defaults.defaultModel : 'default';
+      readlineInterface.question(`  Model [${defaultModel}]: `, resolve);
     });
 
-    console.log(chalk.green(`\n  ✓ Added "${provider}"\n`));
+    // Ask for base URL (with default shown)
+    const baseUrl = await new Promise(function(resolve) {
+      const defaultUrl = defaults ? defaults.baseUrl : 'https://';
+      readlineInterface.question(`  Base URL [${defaultUrl}]: `, resolve);
+    });
+
+    // Save the provider to the config store
+    const store = new ProviderStore();
+    store.setProvider(selectedProvider, {
+      apiKey: apiKey.trim(),
+      model: model.trim() || (defaults ? defaults.defaultModel : ''),
+      baseUrl: (baseUrl.trim() || (defaults ? defaults.baseUrl : '')).replace(/\/+$/, ''),
+      addedAt: new Date().toISOString()
+    });
+
+    console.log(chalk.green(`\n  ✓ Added "${selectedProvider}"\n`));
+
   } finally {
-    rl.close();
+    readlineInterface.close();
   }
 }
 
-async function removeProvider(name) {
+// ──────────────────────────────────────────────────────────────────────
+// ACTION: REMOVE A PROVIDER
+// ──────────────────────────────────────────────────────────────────────
+
+function removeProvider(providerName) {
   const store = new ProviderStore();
-  const result = store.removeProvider(name);
-  if (result) {
-    console.log(chalk.dim(`\n  Removed provider: ${name}\n`));
+  const wasRemoved = store.removeProvider(providerName);
+
+  if (wasRemoved) {
+    console.log(chalk.dim(`\n  Removed provider: ${providerName}\n`));
   } else {
-    console.log(chalk.red(`  ✖ Provider "${name}" not found\n`));
+    console.log(chalk.red(`  ✖ Provider "${providerName}" not found\n`));
   }
 }
 
-async function testProvider(name) {
+// ──────────────────────────────────────────────────────────────────────
+// ACTION: TEST A PROVIDER CONNECTION
+// ──────────────────────────────────────────────────────────────────────
+// Tries to connect to the provider and list its models to verify
+// the API key and endpoint are correct.
+
+async function testProvider(providerName) {
   const store = new ProviderStore();
-  const config = store.getProvider(name);
-  if (!config) {
-    console.log(chalk.red(`  ✖ Provider "${name}" not configured\n`));
+  const providerConfig = store.getProvider(providerName);
+
+  // Check if the provider has been configured
+  if (!providerConfig) {
+    console.log(chalk.red(`  ✖ Provider "${providerName}" not configured. Add it first.\n`));
     return;
   }
 
+  // Try to connect to the provider
   try {
+    // Build a config object from the stored provider info
     const { loadConfig } = require('../lib/config');
-    const cfg = loadConfig({
-      provider: name,
-      apiKey: config.apiKey || '',
-      model: config.model || (providerDefaults(name) || {}).defaultModel,
-      baseUrl: config.baseUrl || (providerDefaults(name) || {}).baseUrl,
+    const configuration = loadConfig({
+      provider: providerName,
+      apiKey: providerConfig.apiKey || '',
+      model: providerConfig.model || (providerDefaults(providerName) || {}).defaultModel,
+      baseUrl: providerConfig.baseUrl || (providerDefaults(providerName) || {}).baseUrl
     });
-    const prov = createProvider(cfg);
 
-    let success = false;
-    await withSpinner(`Testing ${name}…`, async () => {
-      const models = await prov.listModels();
-      success = models && models.length > 0;
-      if (!success) throw new Error('No models available');
+    // Create the provider and try to list models (proves connectivity)
+    const provider = createProvider(configuration);
+
+    let connectionSuccessful = false;
+
+    await withSpinner('  Testing connection…', async function() {
+      const models = await provider.listModels();
+      connectionSuccessful = models && models.length > 0;
+      if (!connectionSuccessful) {
+        throw new Error('No models returned from provider');
+      }
     });
 
     console.log(`  ${chalk.green('✓')} ${chalk.dim('Connection successful')}\n`);
-  } catch (err) {
-    console.log(`  ${chalk.red('✖')} ${chalk.dim('Connection failed:')} ${err.message}\n`);
+
+  } catch (error) {
+    console.log(`  ${chalk.red('✖')} ${chalk.dim('Connection failed:')} ${error.message}\n`);
   }
 }
 
-async function switchProvider(name) {
+// ──────────────────────────────────────────────────────────────────────
+// ACTION: SWITCH TO A PROVIDER
+// ──────────────────────────────────────────────────────────────────────
+
+function switchToProvider(providerName) {
   const store = new ProviderStore();
-  const config = store.getProvider(name);
-  if (!config) {
-    console.log(chalk.red(`  ✖ Provider "${name}" not configured. Add it first.\n`));
+  const providerConfig = store.getProvider(providerName);
+
+  // Check if the provider has been configured
+  if (!providerConfig) {
+    console.log(chalk.red(`  ✖ Provider "${providerName}" not configured. Add it first.\n`));
     return;
   }
-  store.setActive(name);
-  console.log(chalk.green(`  ✓ Switched to ${name}\n`));
+
+  // Switch to it
+  store.setActive(providerName);
+  console.log(chalk.green(`  ✓ Switched to ${providerName}\n`));
 }
 
-// ── Interactive switching ──────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// INTERACTIVE PROVIDER SWITCHING
+// ──────────────────────────────────────────────────────────────────────
 
-async function promptProvider(current) {
-  const rl = readline.createInterface({
-    input: process.stdin, output: process.stdout, terminal: true,
+async function promptForProvider(currentProvider) {
+  const readlineInterface = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    terminal: true
   });
 
-  return new Promise((resolve) => {
-    console.log(chalk.dim('\n  Enter provider name (Enter to keep current):\n'));
-    rl.question(`  ${chalk.cyan('Provider')} [${current}]: `, (answer) => {
-      rl.close();
-      const trimmed = answer.trim().toLowerCase();
-      if (!trimmed) return resolve(current);
-      const providers = knownProviders();
-      if (providers.includes(trimmed)) return resolve(trimmed);
-      console.error(chalk.red(`  ✖ Unknown. Valid: ${providers.join(', ')}`));
-      resolve(current);
-    });
+  return new Promise(function(resolve) {
+    console.log(chalk.dim('\n  Enter a provider name (or press Enter to keep current):\n'));
+
+    readlineInterface.question(
+      `  ${chalk.cyan('Provider')} [${currentProvider}]: `,
+      function(userAnswer) {
+        readlineInterface.close();
+
+        const trimmedAnswer = userAnswer.trim().toLowerCase();
+
+        // If the user pressed Enter without typing anything, keep current
+        if (!trimmedAnswer) {
+          resolve(currentProvider);
+          return;
+        }
+
+        // Check if the provider name is valid
+        const validProviders = knownProviders();
+        if (validProviders.includes(trimmedAnswer)) {
+          resolve(trimmedAnswer);
+        } else {
+          console.error(chalk.red(`  ✖ Unknown provider: "${trimmedAnswer}"`));
+          console.error(chalk.dim(`    Valid options: ${validProviders.join(', ')}`));
+          resolve(currentProvider); // Keep current on error
+        }
+      }
+    );
   });
 }
 
-// ── Main ───────────────────────────────────────────────────────────────
+// ──────────────────────────────────────────────────────────────────────
+// MAIN PROVIDER COMMAND
+// ──────────────────────────────────────────────────────────────────────
+// This is called from src/index.js when the user types `pulse provider`
 
-async function providerCommand(options = {}) {
+async function providerCommand(options) {
   const store = new ProviderStore();
+
+  // Get all configured providers and the active one
   const allProviders = store.list();
-  const configuredNames = allProviders.map((p) => p.name);
+  const configuredNames = allProviders.map(function(provider) {
+    return provider.name;
+  });
   const activeProvider = store.getActive() || 'openai';
 
+  // ── Decide what to do based on the options ──────────────────────
+
+  // pulse provider --add
   if (options.add) {
     await addProvider();
     return;
   }
 
+  // pulse provider --remove <name>
   if (options.remove) {
-    await removeProvider(options.remove);
+    removeProvider(options.remove);
     return;
   }
 
+  // pulse provider --test <name>
   if (options.test) {
     await testProvider(options.test);
     return;
   }
 
-  if (options.interactive || options.i) {
-    listProvidersTable({ active: activeProvider, configured: configuredNames });
-    const selected = await promptProvider(activeProvider);
-    if (selected && selected !== activeProvider) {
-      await switchProvider(selected);
+  // pulse provider -i (interactive mode)
+  if (options.interactive) {
+    showProviderTable({ active: activeProvider, configured: configuredNames });
+    const selectedProvider = await promptForProvider(activeProvider);
+
+    if (selectedProvider && selectedProvider !== activeProvider) {
+      switchToProvider(selectedProvider);
     } else {
       console.log(chalk.dim('  No change.\n'));
     }
     return;
   }
 
-  // Default: show provider list
-  listProvidersTable({ active: activeProvider, configured: configuredNames });
-  console.log(chalk.dim(`  Active: ${chalk.bold(activeProvider)}`));
+  // ── Default: just show the provider list ─────────────────────────
+  showProviderTable({ active: activeProvider, configured: configuredNames });
+
+  console.log(chalk.dim(`  Active provider: ${chalk.bold(activeProvider)}`));
   console.log();
-  console.log(chalk.dim(`  ${chalk.cyan('pulse provider -i')}    Interactive switch`));
-  console.log(chalk.dim(`  ${chalk.cyan('pulse provider --add')}  Add a provider`));
-  console.log(chalk.dim(`  ${chalk.cyan('pulse provider --test <name>')}  Test connection`));
-  console.log(chalk.dim(`  ${chalk.cyan('/provider <name>')}   Switch in chat`));
+  console.log(chalk.dim(`  ${chalk.cyan('pulse provider -i')}          Interactive provider switching`));
+  console.log(chalk.dim(`  ${chalk.cyan('pulse provider --add')}       Add a new provider`));
+  console.log(chalk.dim(`  ${chalk.cyan('pulse provider --test <name>')}   Test a provider connection`));
+  console.log(chalk.dim(`  ${chalk.cyan('/provider <name>')}          Switch provider while in chat`));
   console.log();
 }
 
