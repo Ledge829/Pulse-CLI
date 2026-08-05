@@ -658,12 +658,8 @@ async function startChat(config) {
   // ── Step 1: Set up conversation storage ──────────────────────────
   const store = new ConversationStore(CONVERSATIONS_DIRECTORY);
 
-  // Try to load the most recent conversation (so you can resume)
-  let conversation = await store.latest().catch(function() {
-    return null;
-  });
+  let conversation = await store.latest().catch(() => null);
 
-  // If there's no saved conversation, create a new one
   if (!conversation) {
     conversation = store.create({
       model: config.model,
@@ -679,151 +675,63 @@ async function startChat(config) {
   try {
     provider = createProvider(config);
   } catch (error) {
-    // If the config is invalid (e.g., no API key), show a helpful message
     if (error instanceof ConfigError) {
       console.error(chalk.red(`  ✖ ${error.message}`));
       console.error(chalk.dim('  Run "pulse configure" to set up your provider.\n'));
       process.exit(1);
     }
-    throw error; // Unknown error — crash
+    throw error;
   }
 
   // ── Step 3: Set up agent tools ──────────────────────────────────
-  // The agent tools let the AI read files, search code, run commands, etc.
   const agent = createAgent({ cwd: process.cwd() });
 
-  // ── Step 4: Set up the readline interface ───────────────────────
-  // readline is a built-in Node.js module for getting user input
-  const readlineInterface = readline.createInterface({
-    input: process.stdin,     // Read from keyboard
-    output: process.stdout,   // Write to screen
-    terminal: true,           // Enable terminal features
-    historySize: 100,         // Remember 100 previous commands
-    completer: function() {
-      return [[], ''];  // Disable tab completion
-    }
-  });
-
   // ── Step 5: Create the session object ───────────────────────────
-  // This session object is passed around to all the functions.
-  // It holds everything Pulse CLI needs to know: config, provider,
-  // conversation, tools, etc.
   const session = {
-    config: config,                      // Provider settings
-    provider: provider,                  // The AI provider instance
-    conversation: conversation,          // The current conversation
-    readline: readlineInterface,         // The readline interface
-    abortController: new AbortController(), // For cancelling responses
-    isStreaming: false,                  // Is the AI currently responding?
-    multilineMode: false,                // Is multiline input mode on?
-    toolRegistry: agent.registry,         // The agent's tools
-    toolContext: agent.context            // The agent's context (working directory)
+    config: config,
+    provider: provider,
+    conversation: conversation,
+    abortController: new AbortController(),
+    isStreaming: false,
+    multilineMode: false,
+    toolRegistry: agent.registry,
+    toolContext: agent.context
   };
 
-  // ── Step 6: Handle Ctrl+C ───────────────────────────────────────
-  readlineInterface.on('SIGINT', function() {
-    handleCtrlC(session);
-  });
-
-  // ── Step 7: Handle unexpected crashes ───────────────────────────
-  process.on('uncaughtException', function(error) {
-    console.error(chalk.red(`\n  ✖ ${error.message}\n`));
-    try {
-      conversation.save();
-    } catch (saveError) {
-      // Ignore save errors
-    }
-    process.exit(1);
-  });
-
-  // ── Step 8: Show the welcome screen ─────────────────────────────
   console.clear();
-  showWelcome(config);
 
-  // If we're resuming a conversation, show the last messages
-  if (conversation.messageCount > 0) {
-    // Get the last 2 non-system messages
-    const lastMessages = conversation.messages.filter(function(msg) {
-      return msg.role !== 'system';
-    }).slice(-2);
+  // Setup Babel for React
+  require('@babel/register')({
+  babelrc: false,
+  presets: [
+    ['@babel/preset-env', { targets: { node: 'current' } }],
+    ['@babel/preset-react', { runtime: 'automatic' }]
+  ],
+  extensions: ['.js', '.jsx'],
+  ignore: [/node_modules/]
+});
 
-    if (lastMessages.length > 0) {
-      console.log(chalk.dim('  ── Resuming previous conversation ──\n'));
+  const React = require('react');
+  const { render } = require('ink');
+  const App = require('../ui/App.jsx');
+  const { processUserMessageInk } = require('../ui/engine.js');
 
-      for (const message of lastMessages) {
-        const label = message.role === 'user' ? chalk.green('You') : chalk.cyan('Assistant');
-        const preview = message.content.length > 300
-          ? message.content.slice(0, 300) + '…'
-          : message.content;
-        console.log(`  ${label}: ${chalk.dim(preview)}\n`);
+  const { waitUntilExit, clear } = render(
+    React.createElement(App, {
+      session: session,
+      processUserMessage: (msg, onUpdate) => processUserMessageInk(session, msg, onUpdate),
+      onExit: () => {
+        try { session.conversation.save(); } catch (e) {}
       }
-    }
-  }
+    })
+  );
 
-  // Show the status line with provider and model info
-  console.log(chalk.dim(`  ${config.provider} · ${config.model}  |  /help for commands\n`));
-
-  // ── Step 9: The main loop ───────────────────────────────────────
-  // This loop runs forever, getting input and sending it to the AI.
-  while (true) {
-    // Wait for the user to type something and press Enter
-    const userInput = await collectUserInput(session);
-
-    // If the input was empty (just pressed Enter), skip it
-    if (!userInput.text) continue;
-
-    // ── Handle slash commands ──────────────────────────────────────
-    if (userInput.isCommand) {
-      // Extract the command name from "/model gpt-4o" → ["model", "gpt-4o"]
-      const parts = userInput.text.slice(1).split(/\s+/);
-      const commandName = parts[0].toLowerCase();
-      const commandArguments = parts.slice(1);
-
-      // Look up the command in our commands list
-      const command = SLASH_COMMANDS[commandName];
-
-      if (command) {
-        // Run the command
-        try {
-          await command.handler(session, commandArguments);
-        } catch (error) {
-          console.log(chalk.red(`  ✖ ${error.message}\n`));
-        }
-      } else {
-        // Unknown command
-        console.log(chalk.red(`  ✖ Unknown command: /${commandName}\n`));
-      }
-
-      continue; // Go back to waiting for input
-    }
-
-    // ── Handle regular messages ────────────────────────────────────
-    // Show the user's message in the chat
-    console.log(`  ${chalk.green('You')} ${chalk.dim(`[${session.config.model}]`)}`);
-
-    const messageLines = userInput.text.split('\n');
-    for (const line of messageLines) {
-      console.log(`  ${line}`);
-    }
-    console.log();
-
-    // Send the message to the AI and handle the response
-    try {
-      await processUserMessage(session, userInput.text);
-    } catch (error) {
-      // If the user cancelled, just continue
-      if (error.name === 'AbortError') continue;
-
-      // Show a user-friendly error message
-      let errorMessage = error.message;
-      if (error.code === 'NETWORK_ERROR') {
-        errorMessage = 'Network error: ' + error.message;
-      }
-
-      console.log(`  ${chalk.red('✖')} ${chalk.dim(errorMessage)}\n`);
-    }
-  }
+  await waitUntilExit();
+  clear();
+  process.exit(0);
 }
+
+    // The while loop and old input logic were removed above.
 
 // Export for use by src/index.js
 module.exports = { startChat };
