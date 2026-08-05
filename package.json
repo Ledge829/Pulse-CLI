@@ -1,6 +1,6 @@
 {
   "name": "@ledgee/pulse-cli",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Fast, provider-agnostic AI coding assistant — BYOK, any provider, all from your terminal.",
   "license": "MIT",
   "type": "commonjs",
@@ -8,7 +8,7 @@
     "node": ">=18.0.0"
   },
   "bin": {
-    "pulse": "./bin/pulse.js"
+    "pulse": "bin/pulse.js"
   },
   "scripts": {
     "start": "node bin/pulse.js",
